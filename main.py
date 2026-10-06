@@ -3,8 +3,10 @@ import logging
 import sqlite3
 import re
 import gc
+import os
 from datetime import datetime, timedelta
 import aiohttp
+from aiohttp import web
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -16,6 +18,7 @@ CHAT_ID = 5292289444
 OLX_URL = "https://www.olx.ua/uk/elektronika/telefony-i-aksesuary/mobilnye-telefony-smartfony/q-iphone/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:from%5D=500&search%5Bfilter_float_price:to%5D=8000"
 
 CHECK_INTERVAL = 61
+PORT = int(os.environ.get("PORT", 10000))
 # =======================================================
 
 HEADERS = {
@@ -32,7 +35,7 @@ STOP_WORDS = [
 ]
 
 SCAM_TRIGGER_WORDS = [
-    "передоплата", "предоплата", "завдаток", "задатк", "вайбер", "viber",
+    "передоплата", "предоплата", "завдаток", "задатк", "вайбер", "viber", 
     "телеграм", "telegram", "тг ", "пишіть в", "пишите в", "переходьте", "переходите",
     "картк", "карту", "по частичній", "частичная", "только почтой", "тільки поштою"
 ]
@@ -66,8 +69,7 @@ async def fetch_ad_description(url: str) -> str:
             if response.status == 200:
                 html = await response.text()
                 soup = BeautifulSoup(html, "html.parser")
-                desc_tag = soup.find("div", {"data-m2id": "ad_description"}) or soup.find("div", {
-                    "class": re.compile(r'css-1m89803|css-bg1jh4')})
+                desc_tag = soup.find("div", {"data-m2id": "ad_description"}) or soup.find("div", {"class": re.compile(r'css-1m89803|css-bg1jh4')})
                 if desc_tag:
                     return desc_tag.text.lower()
                 desc_div = soup.find("div", class_=lambda c: c and "description" in c.lower())
@@ -83,13 +85,11 @@ def check_scam_risk(title: str, description: str, price: int, target_price: int)
     full_text = f"{title.lower()} {description.lower()}"
     warnings = []
 
-    # 1. Пошук підозрілих фраз
     for word in SCAM_TRIGGER_WORDS:
         if word in full_text:
             warnings.append(f"Прохання передоплати / увід контактів у месенджери ('{word}')")
             break
 
-    # 2. Аномально низька ціна (менше 45% від нормальної ціни викупу)
     if target_price > 0 and price < (target_price * 0.45):
         warnings.append(f"Занадто низька ціна ({price} грн) — високий ризик скаму / фейку!")
 
@@ -99,7 +99,7 @@ def check_scam_risk(title: str, description: str, price: int, target_price: int)
 def detect_defects(text: str) -> list[str]:
     """Сканує текст на наявність дефектів або нюансів"""
     defects = []
-
+    
     if any(w in text for w in ["не працює face", "неробочий face", "без face", "без фейс", "face id не", "не фейс"]):
         defects.append("Не працює Face ID")
     if any(w in text for w in ["немає true tone", "без true tone", "трутон не"]):
@@ -114,7 +114,7 @@ def detect_defects(text: str) -> list[str]:
         defects.append("Нюанси з камерою / пляма")
     if any(w in text for w in ["вм'ятина", "вмятина", "погнутий", "потертий"]):
         defects.append("Косметичні дефекти корпусу")
-
+        
     return defects
 
 
@@ -140,13 +140,11 @@ def analyze_deal(title: str, price_str: str, description: str = "") -> dict:
         result["reason"] = "Не вдалося розпізнати ціну"
         return result
 
-    # 1. Перевірка на стоп-слова
     for stop_word in STOP_WORDS:
         if stop_word in full_text:
             result["reason"] = f"Містить стоп-слово: {stop_word}"
             return result
 
-    # 2. Визначення R-Sim / Bypass
     is_rsim = any(w in full_text for w in ["rsim", "r-sim", "r sim", "чип", "чіп", "операторний"])
     is_bypass = any(w in full_text for w in ["bypass", "байпас", "icloud", "іклауд", "заблокований", "блокований"])
 
@@ -163,7 +161,6 @@ def analyze_deal(title: str, price_str: str, description: str = "") -> dict:
 
     result["defects"].extend(detect_defects(full_text))
 
-    # 3. Визначення конкретної моделі
     model_name = ""
     base_max = 0
     full_market_val = 0
@@ -172,13 +169,11 @@ def analyze_deal(title: str, price_str: str, description: str = "") -> dict:
         model_name = "iPhone 12 Mini"
         base_max, full_market_val = 4500, 5150
 
-    elif ("iphone 12" in title_lower or "айфон 12" in title_lower) and not any(
-            x in title_lower for x in ["mini", "міні", "pro", "про", "max", "макс"]):
+    elif ("iphone 12" in title_lower or "айфон 12" in title_lower) and not any(x in title_lower for x in ["mini", "міні", "pro", "про", "max", "макс"]):
         model_name = "iPhone 12"
         base_max, full_market_val = 5000, 5550
 
-    elif ("iphone 11" in title_lower or "айфон 11" in title_lower) and not any(
-            x in title_lower for x in ["pro", "про", "max", "макс"]):
+    elif ("iphone 11" in title_lower or "айфон 11" in title_lower) and not any(x in title_lower for x in ["pro", "про", "max", "макс"]):
         model_name = "iPhone 11"
         base_max, full_market_val = 3500, 4150
 
@@ -194,8 +189,7 @@ def analyze_deal(title: str, price_str: str, description: str = "") -> dict:
         model_name = "iPhone XR"
         base_max, full_market_val = 2600, 2950
 
-    elif any(m in title_lower for m in ["iphone x", "айфон х", " x "]) and not any(
-            x in title_lower for x in ["xr", "xs", "хр", "хс"]):
+    elif any(m in title_lower for m in ["iphone x", "айфон х", " x "]) and not any(x in title_lower for x in ["xr", "xs", "хр", "хс"]):
         model_name = "iPhone X"
         base_max, full_market_val = 2400, 2900
 
@@ -221,12 +215,12 @@ def analyze_deal(title: str, price_str: str, description: str = "") -> dict:
         return result
 
     max_price = int(base_max * mult)
-
+    
     if 0 <= price <= max_price:
         result["is_good"] = True
         result["model"] = model_name
         result["target_price"] = max_price
-
+        
         bargain_discount = min(300, int(price * 0.08))
         result["bargain_price"] = max(0, price - bargain_discount)
 
@@ -327,8 +321,7 @@ async def fetch_olx_ads():
                     clean_slug = href.split("/")[-1].replace(".html", "")
                     title = clean_slug.replace("-", " ").capitalize()
 
-                price_tag = card.find("p", {"data-testid": "ad-price"}) or card.find("span",
-                                                                                     {"data-testid": "ad-price"})
+                price_tag = card.find("p", {"data-testid": "ad-price"}) or card.find("span", {"data-testid": "ad-price"})
                 price = price_tag.text.strip() if price_tag else "Ціна не вказана"
 
                 location_tag = card.find("p", {"data-testid": "location-date"})
@@ -386,8 +379,7 @@ async def olx_checker_loop(bot: Bot):
 
                         if deal["is_good"]:
                             STATS["good_found"] += 1
-                            defects_text = "\n".join([f"  • {d}" for d in deal["defects"]]) if deal[
-                                "defects"] else "  • Виражених дефектів не виявлено"
+                            defects_text = "\n".join([f"  • {d}" for d in deal["defects"]]) if deal["defects"] else "  • Виражених дефектів не виявлено"
 
                             scam_text = ""
                             if deal["scam_warnings"]:
@@ -449,7 +441,7 @@ async def start_handler(message: Message):
 async def stats_handler(message: Message):
     uptime = str(datetime.now() - STATS["start_time"]).split('.')[0]
     status_str = "⏸ НА ПАУЗІ" if IS_PAUSED else "🟢 АКТИВНИЙ"
-
+    
     stats_text = (
         f"📊 <b>СТАТИСТИКА РОБОТИ БОТА:</b>\n\n"
         f"⚙️ <b>Статус:</b> {status_str}\n"
@@ -465,8 +457,7 @@ async def stats_handler(message: Message):
 async def pause_handler(message: Message):
     global IS_PAUSED
     IS_PAUSED = True
-    await message.answer("⏸ <b>Сканування зупинено!</b> Бот не надсилатиме сповіщення, поки ви не введете `/resume`",
-                         parse_mode="HTML")
+    await message.answer("⏸ <b>Сканування зупинено!</b> Бот не надсилатиме сповіщення, поки ви не введете `/resume`", parse_mode="HTML")
 
 
 @dp.message(Command("resume"))
@@ -484,10 +475,31 @@ async def delete_msg_callback(callback: CallbackQuery):
         await callback.answer("Не вдалося видалити повідомлення", show_alert=False)
 
 
+# ==================== ВЕБ-СЕРВЕР ДЛЯ RENDER ====================
+async def handle_ping(request):
+    return web.Response(text="Bot is running 24/7!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logging.info(f"Міні веб-сервер запущено на порту {PORT}")
+
+
 async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
+    
+    # Запуск веб-сервера
+    await start_web_server()
+    
+    # Запуск фонового циклу перевірки OLX
     asyncio.create_task(olx_checker_loop(bot))
+    
+    # Запуск поллінгу Telegram
     await dp.start_polling(bot)
 
 
